@@ -140,6 +140,7 @@ class LogWidget(QTextEdit):
         """ + scroll_css())
         self._queue: list[str] = []
         self._typing  = False
+        self._streaming = False   # a live (audio-paced) assistant line is open
         self._text    = ""
         self._pos     = 0
         self._tag     = "sys"
@@ -154,7 +155,9 @@ class LogWidget(QTextEdit):
 
     def _enqueue(self, text: str):
         self._queue.append(text)
-        if not self._typing:
+        # While a live line is open anything else waits its turn, or it would be
+        # typed into the middle of that line.
+        if not self._typing and not self._streaming:
             self._next()
 
     def _split(self, text: str) -> tuple[str, str, str]:
@@ -185,15 +188,10 @@ class LogWidget(QTextEdit):
             "sys":  (qcol(C.TEXT_DIM), qcol(C.TEXT_MED)),
         }.get(tag, (qcol(C.TEXT_DIM), qcol(C.TEXT)))
 
-    def _next(self):
-        if not self._queue:
-            self._typing = False
-            return
-        self._typing = True
-        tag, label, words = self._split(self._queue.pop(0))
-        self._tag, self._text, self._pos = tag, words, 0
+    def _start_line(self, tag: str, label: str, words: str):
+        """Open a new transcript entry: the label and time, then an empty body
+        block for the words. Returns nothing; sets the format _step/stream use."""
         label_col, text_col = self._colours(tag)
-
         cur = self.textCursor()
         cur.movePosition(cur.MoveOperation.End)
         head = QTextBlockFormat()
@@ -218,7 +216,60 @@ class LogWidget(QTextEdit):
         self._fmt.setForeground(QBrush(text_col))
         self.setTextCursor(cur)
         self.ensureCursorVisible()
+
+    def _next(self):
+        if self._streaming or not self._queue:
+            self._typing = False
+            return
+        self._typing = True
+        tag, label, words = self._split(self._queue.pop(0))
+        self._tag, self._text, self._pos = tag, words, 0
+        self._start_line(tag, label, words)
         self._tmr.start(6)
+
+    def _insert_now(self, text: str):
+        cur = self.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        cur.insertText(text, self._fmt)
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+
+    def _finish_typing(self):
+        """Complete the line being typed and everything queued behind it, at
+        once, so a live line can start from a settled log."""
+        self._tmr.stop()
+        if self._typing and self._pos < len(self._text):
+            self._insert_now(self._text[self._pos:])
+        self._typing = False
+        while self._queue:
+            tag, label, words = self._split(self._queue.pop(0))
+            self._start_line(tag, label, words)
+            self._insert_now(words)
+
+    def stream(self, op: str, text: str = ""):
+        """A live assistant line, filled as the words are spoken.
+
+        begin(name) opens it, text(piece) appends, end() closes it. Lines from
+        elsewhere that arrive meanwhile are held and typed out after it."""
+        if op == "begin":
+            if self._streaming:
+                return
+            self._finish_typing()
+            self._streaming = True
+            self._start_line("ai", (text or self._ai_name_lc).upper(), "")
+        elif op == "text":
+            if not self._streaming:
+                return
+            piece = text.strip()
+            if piece:
+                sep = " " if self.document().lastBlock().text() else ""
+                self._insert_now(sep + piece)
+        elif op == "end":
+            if not self._streaming:
+                return
+            self._streaming = False
+            if self._queue and not self._typing:
+                self._next()
 
     def _step(self):
         if self._pos < len(self._text):

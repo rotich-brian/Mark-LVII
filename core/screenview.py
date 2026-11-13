@@ -1665,6 +1665,24 @@ def capture(monitor: Optional[dict] = None) -> tuple[Any, dict, float]:
     import PIL.Image
 
     monitor = dict(monitor or monitor_rect())
+    # Wayland: mss gives black. The portal returns the whole desktop; cut out
+    # the requested monitor, scaling the rectangle to the image's pixels.
+    try:
+        from core import waylandshot
+        if waylandshot.is_wayland() and monitor.get("width") and monitor.get("height"):
+            full = waylandshot.grab_image()
+            if full is not None:
+                ox, oy, total_w, _h = _logical_screen()
+                total_w = float(total_w) or float(monitor["width"])
+                scale = full.width / total_w
+                box = (int((monitor["left"] - ox) * scale), int((monitor["top"] - oy) * scale),
+                       int((monitor["left"] - ox + monitor["width"]) * scale),
+                       int((monitor["top"] - oy + monitor["height"]) * scale))
+                image = full.crop(box)
+                px = image.width / float(monitor["width"])
+                return image, monitor, (px if px > 0 else 1.0)
+    except Exception as e:
+        print(f"[Screen] Wayland capture failed, trying mss: {e}")
     with _mss() as sct:
         shot = sct.grab({"left": monitor["left"], "top": monitor["top"],
                          "width": monitor["width"], "height": monitor["height"]})

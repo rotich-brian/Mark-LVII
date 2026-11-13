@@ -91,6 +91,17 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
 
 def _capture_screen() -> tuple[bytes, str]:
 
+    # Wayland: mss returns a black frame (every pixel 0), so go through the
+    # desktop portal. None means unavailable or refused -> fall back to mss.
+    try:
+        from core import waylandshot
+        if waylandshot.is_wayland():
+            png = waylandshot.grab_png()
+            if png:
+                return _compress(png, "PNG")
+    except Exception as e:
+        print(f"[Vision] Wayland capture failed, trying mss: {e}")
+
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
 

@@ -57,3 +57,6 @@ screenshots/
 # Local backups of the settings file (contain the API key)
 config/api_keys.json.bak
 config/api_keys.json.*
+
+# Single-instance lock (runtime)
+config/jarvis.lock

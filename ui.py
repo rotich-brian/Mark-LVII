@@ -258,6 +258,10 @@ class JarvisUI:
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
+    def stream_log(self, op: str, text: str = ""):
+        """Thread-safe: a live assistant line - op is begin | text | end."""
+        self._win._stream_sig.emit(op, text)
+
     def wait_for_api_key(self):
         while not self._win._ready:
             time.sleep(0.1)
@@ -381,4 +385,4 @@ class JarvisUI:
 
     def stop_speaking(self):
         if not self.muted:
-            self.set_state("LISTENING")
+            self.set_state("LISTENING")

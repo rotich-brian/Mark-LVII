@@ -1238,11 +1238,30 @@ class DashboardServer:
                 f"https://{self._ip}:{SECURE_PORT}/{path}{query}",
                 status_code=307)
 
+        # This is a convenience; the dashboard works without it. When something
+        # else owns the port (another project's dev server, observed) uvicorn
+        # does not raise - it calls sys.exit(3), and that SystemExit went through
+        # the whole event loop and cancelled the Gemini connection being made at
+        # the time. So check first, and never let this task take anything down.
+        _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _probe.bind(("0.0.0.0", PORT))
+        except OSError:
+            print(f"[Dashboard] Port {PORT} is used by another program - the "
+                  f"short address will not redirect. Use the QR code or "
+                  f"https://{self._ip}:{SECURE_PORT} directly.")
+            return
+        finally:
+            _probe.close()
+
         cfg = uvicorn.Config(bounce, host="0.0.0.0", port=PORT,
                              log_level="warning")
         print(f"[Dashboard] Type by hand:  {self._ip}:{PORT}  "
               f"(sends you to the secure page)")
-        await uvicorn.Server(cfg).serve()
+        try:
+            await uvicorn.Server(cfg).serve()
+        except (SystemExit, Exception) as e:
+            print(f"[Dashboard] Redirector on port {PORT} stopped: {e!r}")
 
     async def serve(self) -> None:
         if not _DEPS_OK:

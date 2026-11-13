@@ -875,19 +875,23 @@ class _BrowserSession:
             # opens in a separate one where they are signed in to nothing —
             # and a Gmail that asks them to log in looks like a broken
             # assistant unless somebody says why.
+            # The page DID open: its own address was read back. This used to be
+            # reported as "unverified" whenever the separate profile was in use,
+            # with an order to tell the user it could not be confirmed - and the
+            # model obeyed, never reading the page (observed: a score lookup
+            # answered with "I can't confirm that it loaded").
+            nxt = ("NEXT: call this tool with action='get_text' to read the "
+                   "page and answer from what it says.")
             if self.profile_kind == "separate":
-                return outcome.unverified(
-                    "browser_control",
-                    f"the page opened at {result_url}, but "
-                    f"{self.browser_name} was already running so its profile "
-                    f"was locked - this window uses a separate profile where "
-                    f"the user is NOT signed in to anything. Closing "
-                    f"{self.browser_name} first would let their own profile be "
-                    f"used",
-                    opened=result_url, profile="separate")
+                return outcome.done(
+                    "browser_control", opened=result_url, profile="separate",
+                    verified=True,
+                    note=("loaded in a separate browser profile where the user "
+                          "is not signed in to anything; only mention this if "
+                          "the task needs a login. " + nxt))
             return outcome.done("browser_control", opened=result_url,
                                 profile=self.profile_kind or "real",
-                                verified=True)
+                                verified=True, note=nxt)
         return outcome.failed(
             "browser_control",
             "the page stayed blank - the address may be wrong, or the site may "
@@ -1443,6 +1447,10 @@ TOOL = {
         "browser first - doing both launches it twice, the second copy on a "
         "different profile with none of the user's sign-ins. 'Open Chrome and "
         "go to YouTube' is ONE call to this tool. "
+        "For a quick fact (a score, a price, the news) with no need to show "
+        "the user a page, prefer the web_search tool. If the user asks to "
+        "check something ON THE BROWSER, search, then read the page with "
+        "get_text and report what it says. "
         "TO OPEN A NAMED WEBSITE use action='go_to' with its url; "
         "action='search' only runs a web search and IGNORES any url you pass. "
         "TO SCROLL OR PAGE THROUGH A WEB PAGE use action='scroll' on this "

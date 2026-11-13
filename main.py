@@ -639,6 +639,16 @@ class JarvisLive:
         # guessed; see _play_audio.
         self._out_latency          = 0.20    # seconds, replaced with the real value
         self._tail_until           = 0.0     # monotonic time the echo tail expires
+        self._last_keepalive       = 0.0     # last silent frame sent while speaking
+        self._last_audio_sent      = 0.0     # monotonic time of the last frame sent upstream
+        # Transcript paced to the voice: each piece of text is stamped with how
+        # much audio had arrived, and shown once playback has written that much.
+        self._enq_bytes            = 0       # speech audio received this turn stream
+        self._played_bytes         = 0       # ... and written to the speakers
+        self._text_pending: list   = []      # (stamp, "text"|"end", words)
+        self._text_streamed        = False   # this turn already shown live
+        self._stream_open          = False
+        self._frames_sent          = 0
         # Wall-clock time at which the audio written next will begin to sound.
         # The mouth is scheduled against this, never against "now": batches are
         # handed to the device far faster than they play, so "now" ran the lips
@@ -1327,6 +1337,47 @@ class JarvisLive:
         except Exception:
             pass
 
+    def _log_user_line(self, full_in: str) -> None:
+        self._last_out_logged = ""   # new exchange
+        self.ui.write_log(f"You: {full_in}")
+        self._session_log.append(f"User: {full_in}")
+        if self._dashboard:
+            asyncio.create_task(self._dashboard.broadcast({
+                "type": "log", "speaker": "user",
+                "text": full_in,
+                "ts": datetime.now().isoformat(),
+            }))
+
+    def _release_text(self, everything: bool = False) -> None:
+        """Show the transcript pieces whose audio has now been written to the
+        speakers. With everything=True (nothing left to play) show the rest."""
+        pend = self._text_pending
+        while pend and (everything or pend[0][0] <= self._played_bytes):
+            _stamp, kind, words = pend.pop(0)
+            try:
+                if kind == "end":
+                    if self._stream_open:
+                        self.ui.stream_log("end")
+                        self._stream_open = False
+                else:
+                    if not self._stream_open:
+                        self.ui.stream_log("begin", self._asst_name)
+                        self._stream_open = True
+                    self.ui.stream_log("text", words)
+            except Exception:
+                pass
+
+    def _drop_pending_text(self) -> None:
+        """Interrupted: the words not yet shown are never going to be spoken."""
+        self._text_pending.clear()
+        self._enq_bytes = self._played_bytes = 0
+        if self._stream_open:
+            try:
+                self.ui.stream_log("end")
+            except Exception:
+                pass
+            self._stream_open = False
+
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
@@ -1342,6 +1393,7 @@ class JarvisLive:
             if drained:
                 print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
         self.set_speaking(False)
+        self._drop_pending_text()
         # The words we were about to mouth are never going to be spoken now.
         self._visemes.reset()
         self._play_cursor = 0.0     # next batch starts a fresh timeline
@@ -1791,6 +1843,8 @@ class JarvisLive:
                     mime_type=msg.get("mime_type", "audio/pcm"),
                 )
             )
+            self._last_audio_sent = time.monotonic()
+            self._frames_sent += 1
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
@@ -1830,6 +1884,20 @@ class JarvisLive:
                 # block here and call interrupt() after `required_blocks` of
                 # agreement — but it depends on the listener's room, so it stays
                 # out until it can be tried on real hardware.
+                #
+                # Keep-alive: a long spoken answer streams nothing, and the
+                # server closes the session with "1008 ... client inactivity"
+                # (seen repeatedly), so the next thing the user says lands in
+                # the reconnect gap. Silence, not the microphone: nothing the
+                # user could hear or say leaves the machine, and it carries no
+                # speech for the server to react to.
+                _now = time.monotonic()
+                if _now - self._last_keepalive > 4.0 and not self._phone_active:
+                    self._last_keepalive = _now
+                    loop.call_soon_threadsafe(
+                        self.out_queue.put_nowait,
+                        {"data": bytes(len(indata.tobytes())),
+                         "mime_type": "audio/pcm"})
                 return
 
             # ── Echo tail ────────────────────────────────────────────────────
@@ -1993,6 +2061,7 @@ class JarvisLive:
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                            self._enq_bytes += len(_audio_data)
 
                     if response.server_content:
                         sc = response.server_content
@@ -2008,6 +2077,17 @@ class JarvisLive:
                             # twice AND made the avatar mouth it twice.
                             if txt and not _is_repeat_chunk(txt, out_buf):
                                 out_buf.append(txt)
+                                # The assistant has started answering, so what
+                                # the user said is complete: log it NOW, before
+                                # the live answer line, or it would land after.
+                                if in_buf:
+                                    _fi = " ".join(in_buf).strip()
+                                    in_buf = []
+                                    if _fi:
+                                        self._log_user_line(_fi)
+                                # Paced to the voice: shown when its audio plays.
+                                self._text_pending.append((self._enq_bytes, "text", txt))
+                                self._text_streamed = True
                                 # Hand the words to the mouth as they arrive, so
                                 # the avatar can form the consonants the audio
                                 # alone cannot show. Pure string work — it adds
@@ -2035,15 +2115,7 @@ class JarvisLive:
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
-                                self._last_out_logged = ""   # new exchange
-                                self.ui.write_log(f"You: {full_in}")
-                                self._session_log.append(f"User: {full_in}")
-                                if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({
-                                        "type": "log", "speaker": "user",
-                                        "text": full_in,
-                                        "ts": datetime.now().isoformat(),
-                                    }))
+                                self._log_user_line(full_in)
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
@@ -2053,9 +2125,16 @@ class JarvisLive:
                             if full_out and len(full_out) >= _REPEAT_MIN and self._last_out_logged:
                                 if full_out in self._last_out_logged:
                                     full_out = ""
+                            _streamed = self._text_streamed
+                            if _streamed:
+                                # Shown live, paced to the audio. Close the line
+                                # once its last words have played.
+                                self._text_pending.append((self._enq_bytes, "end", ""))
+                                self._text_streamed = False
                             if full_out:
                                 self._last_out_logged = full_out
-                                self.ui.write_log(f"{self._asst_name}: {full_out}")
+                                if not _streamed:
+                                    self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
@@ -2085,7 +2164,11 @@ class JarvisLive:
                         )
                         await self._flush_pending_vision()
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            _ago = (time.monotonic() - self._last_audio_sent) if self._last_audio_sent else -1
+            print(f"[JARVIS] ❌ Recv: {e}  [diag: last audio sent {_ago:.1f}s ago, "
+                  f"{self._frames_sent} frames this run, speaking={self._is_speaking}, "
+                  f"muted={self.ui.muted}, ptt={self._ptt_enabled}, "
+                  f"wake_asleep={self._wake_enabled and not self._awake}]")
             traceback.print_exc()
             raise
 
@@ -2141,6 +2224,12 @@ class JarvisLive:
                         timeout=0.1
                     )
                 except asyncio.TimeoutError:
+                    # Nothing queued to play, so nothing is left to wait for:
+                    # show whatever words remain (a text-only answer, or the
+                    # tail of one).
+                    if self._text_pending and self.audio_in_queue.empty():
+                        self._played_bytes = self._enq_bytes
+                        self._release_text(everything=True)
                     if (
                         self._turn_done_event
                         and self._turn_done_event.is_set()
@@ -2216,6 +2305,10 @@ class JarvisLive:
                     await asyncio.to_thread(stream.write, bytes(batch))
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
+                # The words that belong to this audio can be shown now.
+                self._played_bytes += len(batch)
+                if self._text_pending:
+                    self._release_text()
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
             raise
@@ -3049,7 +3142,45 @@ def _exit_process(code: int = 0) -> None:
     _os._exit(code)
 
 
+_instance_lock = None   # held for the life of the process; the OS frees it on exit or crash
+
+
+def _acquire_single_instance() -> bool:
+    """True if this is the only copy of the app. False if another already runs.
+
+    Two copies share one microphone and speak over each other, and the second
+    cannot get the dashboard ports. The lock is an OS file lock, so a crash or a
+    kill releases it by itself - no stale lock file can ever block a start. If
+    locking is unavailable on this platform it returns True (never block a start).
+    """
+    global _instance_lock
+    try:
+        path = Path(BASE_DIR) / "config" / "jarvis.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+")
+        try:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:                       # Windows
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        _instance_lock = fh
+        return True
+    except (BlockingIOError, PermissionError):
+        return False
+    except OSError as e:
+        import errno
+        return e.errno not in (errno.EAGAIN, errno.EACCES)
+    except Exception:
+        return True
+
+
 def main():
+    if not _acquire_single_instance():
+        print("[JARVIS] Another copy is already running - not starting a second one. "
+              "Close it first (or use its Restart button).")
+        sys.exit(0)
     ui = JarvisUI("face.png")
     holder: dict = {}
 
@@ -3075,4 +3206,4 @@ def main():
     _exit_process(0)
 
 if __name__ == "__main__":
-    main()
+    main()

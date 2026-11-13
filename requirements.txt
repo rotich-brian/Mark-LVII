@@ -46,6 +46,7 @@ pyperclip
 pillow>=10,<13
 opencv-python>=4.8,<5
 mss>=9,<11
+jeepney>=0.8,<1             # core/waylandshot — Wayland screen capture via the desktop portal; Linux only (harmless elsewhere)
 
 # ── System, files & documents ─────────────────────────────────────────────────
 psutil>=5.9,<8
