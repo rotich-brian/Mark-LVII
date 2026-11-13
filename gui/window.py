@@ -1656,9 +1656,45 @@ class MainWindow(QMainWindow):
         # "&&": a single & in a button label is Qt's shortcut marker, and it
         # was being drawn as an underscore — "ENGINE _PROVIDERS".
         _btn("🔌  ENGINE && PROVIDERS", self._open_providers)
+        _btn("↻  RESTART APP", self._restart_app)
 
         w.adjustSize()
         return w
+
+    def _restart_app(self):
+        """Quit cleanly, then start the same command again.
+
+        A small helper process waits for THIS process to be gone before it execs
+        the new one, so the new instance never races the old one for the
+        dashboard ports (8000/8001), the microphone or the config file. Quitting
+        the Qt loop lets main() run its normal shutdown (finish() and the atexit
+        handlers) rather than killing the process mid-write.
+        """
+        helper = (
+            "import os, sys, time\n"
+            "pid, cwd, cmd = int(sys.argv[1]), sys.argv[2], sys.argv[3:]\n"
+            "for _ in range(100):\n"                      # up to ~15 s
+            "    try: os.kill(pid, 0)\n"
+            "    except OSError: break\n"
+            "    time.sleep(0.15)\n"
+            "time.sleep(0.5)\n"
+            "os.chdir(cwd)\n"
+            "os.execv(cmd[0], cmd)\n"
+        )
+        # sys.executable keeps a venv's interpreter; orig_argv keeps the script
+        # path and any interpreter flags exactly as they were typed.
+        cmd = [sys.executable] + list(getattr(sys, "orig_argv", sys.argv)[1:])
+        try:
+            subprocess.Popen(
+                [sys.executable, "-I", "-c", helper, str(os.getpid()), os.getcwd(), *cmd],
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            self._log.append_log(f"SYS: Could not restart: {e}")
+            return
+        self._log.append_log("SYS: Restarting…")
+        self._quick_drawer.hide()
+        QTimer.singleShot(150, QApplication.instance().quit)
 
     def _build_controls_drawer(self) -> QWidget:
         """The switches that get flicked every day, in their own panel."""

@@ -595,6 +595,25 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
             "no browser on this system could be opened", url=url)
 
 
+_ACTION_ALIASES = {
+    "key": "press", "keypress": "press", "press_key": "press",
+    "enter": "press", "submit": "press",      # press() defaults to Enter
+}
+
+
+def _automation_first() -> bool:
+    """Open pages in the controllable automation window from the start.
+
+    On by default, so "search for X and read me the result" can actually go on to
+    read or click. Set "browser_automation_first": false in config/api_keys.json
+    to go back to handing a plain open to the system's default browser."""
+    try:
+        from memory.config_manager import load_api_keys
+        return bool(load_api_keys().get("browser_automation_first", True))
+    except Exception:
+        return True
+
+
 class _BrowserSession:
     """
     A full session for one browser instance.
@@ -923,14 +942,68 @@ class _BrowserSession:
     async def press(self, key: str) -> str:
         page = await self._get_page()
         try:
+            before = page.url
             await page.keyboard.press(key)
+            # Enter on a search box starts a navigation that has not happened
+            # yet when press() returns. A read issued straight away (observed:
+            # 10 ms later) sees the OLD page. Give the address up to 5 s to
+            # change; a key that navigates nothing just costs that wait once.
+            if str(key).lower() in ("enter", "return"):
+                for _ in range(50):
+                    if page.url != before:
+                        break
+                    await asyncio.sleep(0.1)
+                if page.url != before:
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
             return f"Pressed: {key}"
         except Exception as e:
             return f"Key error: {e}"
 
-    async def get_text(self) -> str:
+    async def _healthy(self) -> bool:
+        """Is this session's browser still there? False once the user has closed
+        it. A closed persistent context raises as soon as a page is asked for;
+        one that merely has no window open just gets a new window."""
+        try:
+            if self._context is None:
+                return True                      # not launched yet
+            if self._page is not None and not self._page.is_closed():
+                return True
+            for p in self._context.pages:
+                if not p.is_closed():
+                    self._page = p
+                    return True
+            self._page = await self._context.new_page()
+            return True
+        except Exception:
+            return False
+
+    async def get_text(self, selector: str = None) -> str:
+        """The page's text.
+
+        With a selector (e.g. 'p'), only the matching elements, empty ones
+        skipped - the way to read an article's paragraphs rather than its menus.
+        Without one, the page's main content area when it has one, otherwise the
+        whole body: the first 4,000 characters of <body> on most sites are
+        navigation, so the thing asked for was never in what came back."""
         page = await self._get_page()
         try:
+            if selector:
+                parts = [t.strip() for t in await page.locator(selector).all_inner_texts()]
+                parts = [t for t in parts if t]
+                if parts:
+                    return "\n\n".join(parts)[:4_000]
+                return f"No text found for selector {selector!r}."
+            for sel in ("main", "article", "[role=main]"):
+                try:
+                    if await page.locator(sel).count():
+                        text = (await page.locator(sel).first.inner_text()).strip()
+                        if len(text) > 200:
+                            return text[:4_000]
+                except Exception:
+                    continue
             text = await page.inner_text("body")
             return text[:4_000]
         except Exception as e:
@@ -1094,6 +1167,24 @@ class _SessionRegistry:
             browser_name = self._active_browser or _detect_default_browser()
         browser_name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
         sess = self._get_or_create(browser_name)
+        # If the user closed the automation window, the session object is still
+        # here but its browser is gone, and every call fails with "Target page,
+        # context or browser has been closed". Observed: five retries in a row,
+        # each failing in milliseconds. Notice that and start a fresh session.
+        if getattr(sess, "_loop", None) and getattr(sess, "_context", None) is not None:
+            try:
+                alive = sess.run(sess._healthy(), timeout=8)
+            except Exception:
+                alive = False
+            if not alive:
+                print(f"[Registry] {browser_name} window was closed - starting a new session")
+                with self._lock:
+                    self._sessions.pop(browser_name, None)
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+                sess = self._get_or_create(browser_name)
         self._active_browser = browser_name
         return sess
 
@@ -1183,6 +1274,14 @@ def browser_control(
 ) -> str:
     params  = parameters or {}
     action  = params.get("action", "").lower().strip()
+    # The model keeps reaching for these names for "press a key". Observed:
+    # action='key' key='Enter' after typing into a search box, which failed as an
+    # unknown action and left the search unsubmitted.
+    action  = _ACTION_ALIASES.get(action, action)
+    # Observed next: the call {'key': 'Enter'} with NO action at all. A key and
+    # nothing else can only mean "press it".
+    if not action and params.get("key"):
+        action = "press"
     browser = params.get("browser", "").lower().strip() or None
     result  = _unknown_action(action)
 
@@ -1215,8 +1314,17 @@ def browser_control(
     # opens here. The only exception: if an automation flow is already running,
     # navigation continues in that window (so multi-step tasks aren't split).
     if action in ("go_to", "search", "new_tab"):
-        if _registry.has(browser):
-            sess = _registry.get(browser)
+        sess = None
+        if _registry.has(browser) or _automation_first():
+            try:
+                sess = _registry.get(browser)
+            except Exception as e:
+                # Could not start the automation window: fall through to the
+                # system's default browser rather than failing the request.
+                print(f"[Browser] Automation window unavailable ({e}) - "
+                      f"using the default browser instead")
+                sess = None
+        if sess is not None:
             try:
                 if action == "search":
                     result = sess.run(sess.search(params.get("query", ""),
@@ -1281,8 +1389,13 @@ def browser_control(
             result = sess.run(sess.smart_click(params.get("description", "")))
         elif action == "smart_type":
             result = sess.run(sess.smart_type(params.get("description", ""), params.get("text", "")))
+            # Typing does not submit. A model that is not told so tends to read the
+            # page next and report on the page it left (observed twice).
+            if str(result).startswith("Typed into"):
+                result += (" - NOT submitted yet. To submit a search or form, call "
+                           "this tool with action='press' and key='Enter'.")
         elif action == "get_text":
-            result = sess.run(sess.get_text())
+            result = sess.run(sess.get_text(params.get("selector") or None))
         elif action == "get_url":
             result = sess.run(sess.get_url())
         elif action == "press":
@@ -1330,6 +1443,12 @@ TOOL = {
         "browser first - doing both launches it twice, the second copy on a "
         "different profile with none of the user's sign-ins. 'Open Chrome and "
         "go to YouTube' is ONE call to this tool. "
+        "TO OPEN A NAMED WEBSITE use action='go_to' with its url; "
+        "action='search' only runs a web search and IGNORES any url you pass. "
+        "TO SCROLL OR PAGE THROUGH A WEB PAGE use action='scroll' on this "
+        "tool, never computer_settings page_up/page_down: those send raw "
+        "keystrokes to whichever window has focus, which on this system is "
+        "often not the browser. "
         "NEVER INVENT AN ADDRESS. Only pass a url you actually know. Anything "
         "belonging to the user personally - their own channel, profile, "
         "account page, inbox or playlist - has an address you do NOT know, and "
@@ -1345,10 +1464,15 @@ TOOL = {
         "'click' with a 'selector' needs a CSS selector that is exactly right "
         "for that site's markup, which is not something to guess at; use it "
         "only when the selector is known. "
-        "For a job on a page that takes several steps - open a site, then find "
-        "and click something on it - call 'screen_agent' instead: it plans the "
-        "steps, calls this tool for each of them, and checks after every one "
-        "that it actually worked. "
+        "For a job that takes several steps, do the steps YOURSELF with this "
+        "tool, one call at a time, checking each result before the next. "
+        "Typical order for 'search a site and read the result': go_to the "
+        "site, smart_type the query into its search box, press Enter "
+        "(action='press'), then get_text to read the page. To read an "
+        "article's paragraphs pass selector='p' to get_text; without a "
+        "selector it returns the page's main content. Do NOT go_to the home "
+        "page again to 'retry' - it throws away the page you are on. There is NO "
+        "screen_agent tool in this assistant - never call it. "
         "Read the status it returns. 'done' means it was confirmed - for an "
         "open, the url reported back is the page's OWN address, so if it "
         "differs from what was asked for the site redirected and the user "

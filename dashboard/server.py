@@ -576,6 +576,22 @@ def _local_ip() -> str:
     return "127.0.0.1"
 
 
+def _cert_covers_current_ip(crt_p) -> bool:
+    """Does the existing certificate list this machine's current LAN address?
+    When it cannot be worked out, say yes: keep what already works."""
+    try:
+        import ipaddress
+        from cryptography import x509
+        lan = _local_ip()
+        if lan.startswith("127."):
+            return True
+        cert = x509.load_pem_x509_certificate(crt_p.read_bytes())
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        return ipaddress.IPv4Address(lan) in san.get_values_for_type(x509.IPAddress)
+    except Exception:
+        return True
+
+
 def _ensure_certs() -> bool:
     """
     Make sure config/certs holds a TLS key pair, generating a self-signed one the
@@ -593,7 +609,12 @@ def _ensure_certs() -> bool:
     key_p = certs / "jarvis.key"
     crt_p = certs / "jarvis.crt"
     if key_p.exists() and crt_p.exists():
-        return True
+        if _cert_covers_current_ip(crt_p):
+            return True
+        # Moved to another network (home Wi-Fi <-> a hotspot): the old certificate
+        # names an address this machine no longer has, so a phone would reject it.
+        print("[Dashboard] The certificate does not cover this network's address — "
+              "generating a new one.")
 
     try:
         import datetime
