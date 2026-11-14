@@ -134,14 +134,13 @@ def detect() -> Support:
         support.can_control_input = portals
         support.can_capture_screen = portals
         support.can_focus_windows = False
-        support.can_use_mouse = False
+        support.can_use_mouse = portals
         if portals:
             support.notes.append(
-                "This is a Wayland session. Typing, key presses and screen "
-                "capture work through the desktop's permission portals "
-                "(the first use asks for permission). Moving or clicking the "
-                "mouse and raising another program's window are not possible "
-                "here."
+                "This is a Wayland session. Typing, key presses, the mouse "
+                "and screen capture work through the desktop's permission "
+                "portals (the first use of each asks for permission). Raising "
+                "another program's window is not possible here."
             )
         else:
             support.notes.append(

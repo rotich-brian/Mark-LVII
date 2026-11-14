@@ -47,6 +47,21 @@ _SLUGS = (
     "arg.1", "usa.1", "mex.1", "rsa.1", "nga.1", "ken.1", "egy.1", "mar.1",
 )
 
+_LEAGUE_NAMES = {
+    "eng.1": "Premier League", "eng.2": "Championship", "eng.fa": "FA Cup",
+    "eng.league_cup": "League Cup", "esp.1": "La Liga", "ger.1": "Bundesliga",
+    "ita.1": "Serie A", "fra.1": "Ligue 1", "ned.1": "Eredivisie",
+    "por.1": "Primeira Liga", "sco.1": "Scottish Premiership", "tur.1": "Super Lig",
+    "bra.1": "Brasileirao", "arg.1": "Argentine Primera", "usa.1": "MLS",
+    "mex.1": "Liga MX", "rsa.1": "South African Premiership",
+    "nga.1": "Nigerian Premier League", "ken.1": "Kenyan Premier League",
+    "egy.1": "Egyptian Premier League", "mar.1": "Botola Pro",
+    "uefa.champions": "Champions League", "uefa.europa": "Europa League",
+    "uefa.europa.conf": "Conference League", "caf.champions": "CAF Champions League",
+    "caf.confed": "CAF Confederation Cup", "conmebol.libertadores": "Copa Libertadores",
+    "esp.copa_del_rey": "Copa del Rey",
+}
+
 PLUGIN = {
     "name": "sports_scores",
     "description": (
@@ -250,9 +265,68 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     return result
 
 
+_NEXT_RE = re.compile(r"\b(next|upcoming|fixtures?|schedule|when|plays?|playing)\b", re.I)
+_NOISE = re.compile(r"\b(next|upcoming|fixtures?|schedule|when|is|are|does|do|plays?|playing|"
+                    r"match(es)?|game(s)?|the|their|his|her|for|of)\b", re.I)
+
+
+def _team_in_league(slug: str, team_norm: str):
+    try:
+        d = _get_json(_ESPN.replace("/scoreboard", "/teams").format(slug=slug), timeout=10)
+        for t in d["sports"][0]["leagues"][0]["teams"]:
+            t = t["team"]
+            if _matches(team_norm, t.get("displayName", "")):
+                return slug, t["id"], t["displayName"]
+    except Exception:
+        pass
+    return None
+
+
+def _upcoming(team_norm: str) -> list[dict]:
+    """The team's next fixtures: ESPN's per-team schedule in its own league, plus
+    anything upcoming in the current scoreboards (cups, Europe)."""
+    out = [e for e in _espn_scan([team_norm], None) if e.get("state") == "pre"]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        found = [r for r in pool.map(lambda sl: _team_in_league(sl, team_norm), _SLUGS) if r]
+    for slug, tid, _name in found[:5]:
+        try:
+            d = _get_json(_ESPN.replace("/scoreboard", f"/teams/{tid}/schedule").format(slug=slug)
+                          + "?fixture=true", timeout=10)
+        except Exception:
+            continue
+        league = _LEAGUE_NAMES.get(slug) or ((d.get("league") or {}).get("name")) or slug
+        for e in d.get("events") or []:
+            try:
+                c = e["competitions"][0]
+                if c["status"]["type"]["state"] != "pre":
+                    continue
+                comps = c["competitors"]
+                home = next(x for x in comps if x.get("homeAway") == "home")
+                away = next(x for x in comps if x.get("homeAway") == "away")
+                out.append({"league": league, "date": e.get("date", ""), "state": "pre",
+                            "home": home["team"]["displayName"], "away": away["team"]["displayName"]})
+            except Exception:
+                continue
+    seen, uniq = set(), []
+    for e in sorted(out, key=lambda e: e.get("date", "")):
+        key = (e["date"][:10], e["home"], e["away"])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(e)
+    return uniq
+
+
 def _run(query: str) -> str:
     if not query:
         return "Which team or match?"
+    if _NEXT_RE.search(query):
+        names = _teams_from_query(_NOISE.sub(" ", query))
+        if len(names) == 1 and names[0]:
+            nxt = _upcoming(names[0])
+            if nxt:
+                lines = [f"{e['home']} v {e['away']}, {_when(e['date'])} ({e['league']})."
+                         for e in nxt[:3]]
+                return "Next fixtures: " + " ".join(lines)
     teams = _teams_from_query(query)
 
     mine = _custom(query)
