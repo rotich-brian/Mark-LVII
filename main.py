@@ -2806,6 +2806,15 @@ class JarvisLive:
         # cannot be opened at them.
         audio_devices.configure(SEND_SAMPLE_RATE, RECEIVE_SAMPLE_RATE)
 
+        # Wayland: route pyautogui's keyboard calls through the permission portal
+        # (no dialog until a key is first sent). No-op on other sessions.
+        try:
+            from core import waylandinput
+            if waylandinput.install():
+                print("[JARVIS] Wayland keyboard input routed through the desktop portal")
+        except Exception as _e:
+            print(f"[JARVIS] Wayland input bridge unavailable: {_e}")
+
         # Enumerate audio devices off-thread. The settings drawer must never pay
         # for host-API enumeration on the Qt thread.
         audio_devices.prefetch()

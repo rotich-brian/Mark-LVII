@@ -102,6 +102,16 @@ class JarvisUI:
         _apply_ui_scale()
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        # Lets the shell tie this window to the launcher (jarvis.desktop) so it
+        # shows the right icon and groups under it, instead of a generic one.
+        try:
+            from PyQt6.QtGui import QIcon
+            self._app.setDesktopFileName("jarvis")
+            _ic = Path(__file__).resolve().parent / "config" / "jarvis.png"
+            if _ic.exists():
+                self._app.setWindowIcon(QIcon(str(_ic)))
+        except Exception:
+            pass
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()

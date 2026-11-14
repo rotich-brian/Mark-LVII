@@ -54,6 +54,7 @@ class Support:
     can_control_input: bool = True      # type, click, hotkeys
     can_capture_screen: bool = True     # screenshots, vision
     can_focus_windows: bool = True      # raise another app's window
+    can_use_mouse: bool = True          # move/click the pointer
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -121,17 +122,34 @@ def detect() -> Support:
         # The whole point of Wayland is that one client cannot drive another.
         # XWayland covers apps that ask for X11, but synthetic input into
         # native Wayland windows is not available to us at all.
-        support.can_control_input = False
-        support.can_capture_screen = False
+        # Wayland does not let a program drive another one freely, but the
+        # desktop portals allow it with the user's permission: the screenshot
+        # portal (core/waylandshot.py) and the RemoteDesktop portal for the
+        # keyboard (core/waylandinput.py). Both need the jeepney library.
+        try:
+            import jeepney  # noqa: F401
+            portals = True
+        except Exception:
+            portals = False
+        support.can_control_input = portals
+        support.can_capture_screen = portals
         support.can_focus_windows = False
-        support.notes.append(
-            "This is a Wayland session, which does not let one program type, "
-            "click, capture the screen or raise another program's window — by "
-            "design, not by fault. Opening applications, files, the web, "
-            "memory and the whole voice pipeline are unaffected. Logging out "
-            "and choosing an Xorg session at the login screen restores the "
-            "rest."
-        )
+        support.can_use_mouse = False
+        if portals:
+            support.notes.append(
+                "This is a Wayland session. Typing, key presses and screen "
+                "capture work through the desktop's permission portals "
+                "(the first use asks for permission). Moving or clicking the "
+                "mouse and raising another program's window are not possible "
+                "here."
+            )
+        else:
+            support.notes.append(
+                "This is a Wayland session, which does not let one program "
+                "type, click, capture the screen or raise another program's "
+                "window - by design. Install jeepney (pip install jeepney) to "
+                "enable typing and screen capture through the desktop portals."
+            )
         return support
 
     # X11: everything is possible, but two small tools carry window focus.
@@ -163,6 +181,12 @@ def describe_for_model(support: Support) -> list[str]:
         lines.append(
             "- You CANNOT see the screen in this session, for the same reason. "
             "Say so rather than describing anything.")
+    if support.can_control_input and not support.can_use_mouse:
+        lines.append(
+            "- You CAN type text and press keys (into whatever window has "
+            "keyboard focus) and see the screen, but you CANNOT move or click "
+            "the mouse on this machine. Do not attempt clicks; if a task needs "
+            "one, say so, or do it with the keyboard (Tab, Enter, shortcuts).")
     if not support.can_focus_windows and support.can_control_input:
         lines.append(
             "- You cannot bring an already-running application to the front "

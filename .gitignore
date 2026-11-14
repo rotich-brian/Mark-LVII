@@ -60,3 +60,6 @@ config/api_keys.json.*
 
 # Single-instance lock (runtime)
 config/jarvis.lock
+
+# Remembered Wayland input permission
+config/wayland_input.json

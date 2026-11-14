@@ -890,8 +890,17 @@ def _type_linux(text: str) -> Optional[str]:
     import shutil
     import subprocess
 
-    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
-        return "a Wayland session does not accept typed input from programs"
+    if os.environ.get("WAYLAND_DISPLAY"):
+        # Wayland: the RemoteDesktop portal, with the user's permission.
+        try:
+            from core import waylandinput
+            if waylandinput.type_text(text):
+                return None
+            return ("the desktop did not allow typing ("
+                    + (waylandinput.last_reason() or "no permission") + ")")
+        except Exception as e:
+            if not os.environ.get("DISPLAY"):
+                return f"typing through the Wayland portal failed ({e})"
     tool = shutil.which("xdotool")
     if not tool:
         return "xdotool is not installed"

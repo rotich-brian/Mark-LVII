@@ -376,6 +376,10 @@ class MainWindow(QMainWindow):
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
         self._ctrl_drawer = self._build_controls_drawer()
+        try:
+            self._setup_tray()
+        except Exception as _e:          # a tray problem must never stop the app
+            print(f"[Tray] unavailable: {_e}")
         self._warm_wake_state()
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
@@ -1662,6 +1666,61 @@ class MainWindow(QMainWindow):
 
         w.adjustSize()
         return w
+
+    def _setup_tray(self):
+        """A tray icon: show/hide the window, stop the assistant mid-sentence,
+        mute, restart, quit. Skipped quietly where the desktop has no tray (on
+        GNOME it needs the AppIndicator extension)."""
+        from PyQt6.QtGui import QAction, QIcon
+        from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
+        self._tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon_path = Path(__file__).resolve().parent.parent / "config" / "jarvis.png"
+        icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip("J.A.R.V.I.S")
+        menu = QMenu()
+
+        act_show = QAction("Hide window", menu)
+        def _toggle_window():
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+        act_show.triggered.connect(_toggle_window)
+        menu.addAction(act_show)
+
+        act_stop = QAction("Stop speaking", menu)
+        act_stop.triggered.connect(self._do_interrupt)
+        menu.addAction(act_stop)
+
+        act_mute = QAction("Mute microphone", menu)
+        act_mute.triggered.connect(self._toggle_mute)
+        menu.addAction(act_mute)
+
+        menu.addSeparator()
+        act_restart = QAction("Restart", menu)
+        act_restart.triggered.connect(self._restart_app)
+        menu.addAction(act_restart)
+        act_quit = QAction("Quit", menu)
+        act_quit.triggered.connect(QApplication.instance().quit)
+        menu.addAction(act_quit)
+
+        def _refresh():
+            act_show.setText("Hide window" if self.isVisible() and not self.isMinimized()
+                             else "Show window")
+            act_mute.setText("Unmute microphone" if self._muted else "Mute microphone")
+        menu.aboutToShow.connect(_refresh)
+
+        tray.setContextMenu(menu)
+        tray.activated.connect(
+            lambda reason: _toggle_window()
+            if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+        tray.show()
+        self._tray = tray        # keep a reference or it disappears
 
     def _restart_app(self):
         """Quit cleanly, then start the same command again.
